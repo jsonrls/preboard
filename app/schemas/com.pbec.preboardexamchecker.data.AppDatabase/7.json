@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 7,
-    "identityHash": "d16c823e2e26c82933332236a0f92dfe",
+    "identityHash": "9e807f8b9760cd261cf95d0b80eb2c7f",
     "entities": [
       {
         "tableName": "questions",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `subject` TEXT NOT NULL, `fileName` TEXT NOT NULL, `category` TEXT, `topic` TEXT, `questionNumber` INTEGER NOT NULL, `questionText` TEXT NOT NULL, `optionA` TEXT NOT NULL, `optionB` TEXT NOT NULL, `optionC` TEXT NOT NULL, `optionD` TEXT NOT NULL, `correctAnswer` TEXT, `importSessionId` INTEGER NOT NULL, `customSessionName` TEXT)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `subject` TEXT NOT NULL, `fileName` TEXT NOT NULL, `category` TEXT, `topic` TEXT, `questionNumber` INTEGER NOT NULL, `questionText` TEXT NOT NULL, `optionA` TEXT NOT NULL, `optionB` TEXT NOT NULL, `optionC` TEXT NOT NULL, `optionD` TEXT NOT NULL, `correctAnswer` TEXT, `questionBankId` TEXT NOT NULL, `importSessionId` INTEGER NOT NULL, `customSessionName` TEXT)",
         "fields": [
           {
             "fieldPath": "id",
@@ -79,6 +79,12 @@
             "columnName": "correctAnswer",
             "affinity": "TEXT",
             "notNull": false
+          },
+          {
+            "fieldPath": "questionBankId",
+            "columnName": "questionBankId",
+            "affinity": "TEXT",
+            "notNull": true
           },
           {
             "fieldPath": "importSessionId",
@@ -220,7 +226,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd16c823e2e26c82933332236a0f92dfe')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '9e807f8b9760cd261cf95d0b80eb2c7f')"
     ]
   }
 }

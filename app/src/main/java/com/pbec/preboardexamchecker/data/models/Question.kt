@@ -18,6 +18,7 @@ data class Question(
     val optionC: String,
     val optionD: String,
     val correctAnswer: String?, // "A", "B", "C", "D", or null
+    val questionBankId: String = "manual",
     val importSessionId: Long = 0L,
     val customSessionName: String? = null // For renaming imported sessions
 )

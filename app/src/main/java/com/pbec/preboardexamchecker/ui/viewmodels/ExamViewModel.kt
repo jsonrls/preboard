@@ -2,12 +2,9 @@ package com.pbec.preboardexamchecker.ui.viewmodels
 
 import android.content.Context
 import android.net.Uri
-import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.firebase.firestore.FirebaseFirestore
 import com.pbec.preboardexamchecker.data.models.Exam
 import com.pbec.preboardexamchecker.data.models.Question
 import com.pbec.preboardexamchecker.data.repository.ExamRepository
@@ -23,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import javax.inject.Inject
 import kotlin.random.Random
 
@@ -30,14 +28,10 @@ import kotlin.random.Random
 class ExamViewModel @Inject constructor(
     private val examRepository: ExamRepository,
     private val questionRepository: QuestionRepository,
-    private val firestore: FirebaseFirestore,
     private val excelParser: ExcelParser,
     @ApplicationContext private val context: Context,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
-    private val firebaseAuth: FirebaseAuth = FirebaseAuth.getInstance()
-    private val logTag = "ExamViewModel"
-
     val subject: String = savedStateHandle.get<String>("subject") ?: "Unknown"
 
     private val _exams = MutableStateFlow<List<Exam>>(emptyList())
@@ -54,13 +48,13 @@ class ExamViewModel @Inject constructor(
         }
     }
 
-    fun generateExam(numQuestions: Int, selectedImportSessionIds: List<Long>) {
+    fun generateExam(numQuestions: Int, selectedQuestionBankIds: List<String>) {
         viewModelScope.launch {
             try {
-                val allQuestions = if (selectedImportSessionIds.isEmpty()) {
+                val allQuestions = if (selectedQuestionBankIds.isEmpty()) {
                     emptyList()
                 } else {
-                    questionRepository.getQuestionsByImportSessionIdsOnly(selectedImportSessionIds)
+                    questionRepository.getQuestionsByQuestionBankIdsOnly(selectedQuestionBankIds)
                 }
                 
                 if (allQuestions.isEmpty()) {
@@ -90,6 +84,7 @@ class ExamViewModel @Inject constructor(
 
                 val examName = "Exam ${exams.value.size + 1} (${subject})" 
                 val newExam = Exam(
+                    id = System.currentTimeMillis() + (0..9999).random(),
                     examName = examName,
                     subject = subject,
                     setAQuestionIds = selectedQuestions.shuffled().map { it.id },
@@ -97,10 +92,9 @@ class ExamViewModel @Inject constructor(
                     createdAt = Date().time 
                 )
 
-                examRepository.insertExam(newExam)
-                syncGeneratedExamToFirestore(
+                examRepository.insertExam(
                     exam = newExam,
-                    selectedImportSessionIds = selectedImportSessionIds,
+                    selectedQuestionBankIds = selectedQuestionBankIds,
                     generatedQuestionCount = selectedQuestions.size,
                     usedBlueprint = useBlueprint,
                     usedRandomFallback = usedRandomFallback
@@ -203,7 +197,16 @@ class ExamViewModel @Inject constructor(
             try {
                 val questions = excelParser.readQuestionsFromExcel(context, uri, selectedSubject, fileName)
                 if (questions.isNotEmpty()) {
-                    questionRepository.insertQuestions(questions)
+                    val importSessionId = System.currentTimeMillis()
+                    val questionBankId = "bank_${UUID.randomUUID()}"
+                    val questionsToInsert = questions.map {
+                        it.copy(
+                            id = System.currentTimeMillis() + (0..9999).random(),
+                            questionBankId = questionBankId,
+                            importSessionId = importSessionId
+                        )
+                    }
+                    questionRepository.insertQuestions(questionsToInsert)
                     _message.value = "Successfully imported ${questions.size} questions."
                 } else {
                     _message.value = "No valid questions found."
@@ -216,60 +219,5 @@ class ExamViewModel @Inject constructor(
 
     fun clearMessage() {
         _message.value = null
-    }
-
-    private fun syncGeneratedExamToFirestore(
-        exam: Exam,
-        selectedImportSessionIds: List<Long>,
-        generatedQuestionCount: Int,
-        usedBlueprint: Boolean,
-        usedRandomFallback: Boolean
-    ) {
-        ensureFirebaseUser { uid ->
-            firestore.collection("exams")
-                .add(
-                    mapOf(
-                        "examName" to exam.examName,
-                        "subject" to exam.subject,
-                        "questionIds" to exam.questionIds,
-                        "createdAt" to exam.createdAt,
-                        "selectedImportSessionIds" to selectedImportSessionIds,
-                        "generatedQuestionCount" to generatedQuestionCount,
-                        "usedBlueprint" to usedBlueprint,
-                        "usedRandomFallback" to usedRandomFallback,
-                        "uploadedByUid" to uid,
-                        "syncedAt" to com.google.firebase.Timestamp.now()
-                    )
-                )
-                .addOnSuccessListener {
-                    Log.d(logTag, "Synced generated exam '${exam.examName}' to Firestore.")
-                }
-                .addOnFailureListener { error ->
-                    Log.e(logTag, "Firestore exam sync failed", error)
-                    _message.value = "Exam generated locally, but Firebase exam sync failed: ${error.message}"
-                }
-        }
-    }
-
-    private fun ensureFirebaseUser(onReady: (String) -> Unit) {
-        val existingUser = firebaseAuth.currentUser
-        if (existingUser != null) {
-            onReady(existingUser.uid)
-            return
-        }
-
-        firebaseAuth.signInAnonymously()
-            .addOnSuccessListener { result ->
-                val uid = result.user?.uid
-                if (uid != null) {
-                    onReady(uid)
-                } else {
-                    _message.value = "Firebase sign-in failed: missing user."
-                }
-            }
-            .addOnFailureListener { error ->
-                Log.e(logTag, "Anonymous Firebase sign-in failed", error)
-                _message.value = "Firebase sign-in failed: ${error.message}"
-            }
     }
 }

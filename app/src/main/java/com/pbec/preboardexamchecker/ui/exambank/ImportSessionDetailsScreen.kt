@@ -28,11 +28,11 @@ import com.pbec.preboardexamchecker.ui.viewmodels.ExamBankViewModel
 fun ImportSessionDetailsScreen(
     navController: NavController,
     subject: String,
-    importSessionId: Long,
+    questionBankId: String,
     viewModel: ExamBankViewModel = hiltViewModel()
 ) {
     val questionsByImportSession by viewModel.questionsByImportSession.collectAsState()
-    val originalQuestions = questionsByImportSession[importSessionId]?.sortedBy { it.questionNumber } ?: emptyList()
+    val originalQuestions = questionsByImportSession[questionBankId]?.sortedBy { it.questionNumber } ?: emptyList()
     
     var isShuffled by remember { mutableStateOf(false) }
     val questions = remember(originalQuestions, isShuffled) {

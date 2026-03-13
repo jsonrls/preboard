@@ -2,7 +2,9 @@ package com.pbec.preboardexamchecker.ui.scan
 
 import android.Manifest
 import android.content.Context
+import android.graphics.Bitmap
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.ViewGroup
@@ -43,6 +45,16 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.pbec.preboardexamchecker.data.models.Exam
 import com.pbec.preboardexamchecker.ui.exams.MathTextView
+import com.pbec.preboardexamchecker.utils.AutoSheetDetector
+import com.pbec.preboardexamchecker.utils.ClassRecordExcelWriter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 
 @Composable
@@ -135,6 +147,12 @@ fun ClusterSelectionScreen(
             style = MaterialTheme.typography.headlineMedium,
             modifier = Modifier.padding(bottom = 24.dp)
         )
+        Text(
+            text = "Before scanning, choose the cluster first.",
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
 
         LazyColumn(modifier = Modifier.fillMaxWidth()) {
             items(clusters) { cluster ->
@@ -175,6 +193,12 @@ fun ExamSelectionScreen(
             text = "Select Generated Exam",
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(bottom = 16.dp)
+        )
+        Text(
+            text = "Select the exam in this cluster so the correct answer key is used during scanning.",
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 12.dp)
         )
 
         if (exams.isEmpty()) {
@@ -278,6 +302,54 @@ fun CaptureMode(
     val context = LocalContext.current
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    val appPrefs = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+    var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
+    var pendingEvaluation by remember { mutableStateOf<ScanEvaluationResult?>(null) }
+    var classRecordUri by remember { mutableStateOf(appPrefs.getString(CLASS_RECORD_URI_KEY, null)?.let(Uri::parse)) }
+    val classRecordPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("No class record selected.")
+            }
+            return@rememberLauncherForActivityResult
+        }
+
+        val evaluation = pendingEvaluation
+        classRecordUri = uri
+        appPrefs.edit().putString(CLASS_RECORD_URI_KEY, uri.toString()).apply()
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        }
+
+        if (evaluation == null) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("Class record selected. Capture to auto-save scan results.")
+            }
+            return@rememberLauncherForActivityResult
+        }
+
+        coroutineScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    ClassRecordExcelWriter.appendResult(context, uri, evaluation)
+                }
+            }.onSuccess {
+                snackbarHostState.showSnackbar(
+                    "Saved: ${evaluation.studentId} - ${evaluation.correctCount}/${evaluation.totalItems} (${String.format(Locale.US, "%.2f", evaluation.scorePercent)}%)"
+                )
+                pendingEvaluation = null
+            }.onFailure { error ->
+                snackbarHostState.showSnackbar("Failed to update class record: ${error.message ?: "Unknown error"}")
+            }
+        }
+    }
     
     val screenWidthPx = remember { mutableFloatStateOf(0f) }
     val density = remember { mutableFloatStateOf(0f) }
@@ -349,6 +421,7 @@ fun CaptureMode(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         bottomBar = {
             Column {
                 // Random Verification Question Card
@@ -390,11 +463,78 @@ fun CaptureMode(
                         Text("Exit", fontSize = 12.sp)
                     }
                     Button(
-                        onClick = { /* TODO: Capture */ },
+                        onClick = {
+                            classRecordPickerLauncher.launch(
+                                arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).height(48.dp).padding(start = 6.dp)
+                    ) {
+                        Text(if (classRecordUri == null) "Record" else "Record ✓", fontSize = 11.sp)
+                    }
+                    Button(
+                        onClick = {
+                            val bitmap = previewViewRef?.bitmap
+                            if (bitmap == null) {
+                                coroutineScope.launch {
+                                    snackbarHostState.showSnackbar("Unable to capture image. Please try again.")
+                                }
+                            } else {
+                                coroutineScope.launch {
+                                    try {
+                                        val savedPath = saveCapturedBitmap(context, bitmap)
+                                        if (savedPath != null) {
+                                            snackbarHostState.showSnackbar("Capture saved. Auto-detecting sheet...")
+                                            val detected = withContext(Dispatchers.Default) {
+                                                AutoSheetDetector.detect(
+                                                    bitmap = bitmap,
+                                                    totalItems = selectedExam.questionIds.size
+                                                )
+                                            }
+
+                                            val autoStudentId = detected.studentId.takeIf { it.isNotBlank() }
+                                                ?: "UNKNOWN-${System.currentTimeMillis() % 100000}"
+                                            val evaluation = viewModel.evaluateCapturedAnswers(
+                                                exam = selectedExam,
+                                                studentId = autoStudentId,
+                                                normalizedAnswers = detected.answers
+                                            )
+                                            pendingEvaluation = evaluation
+
+                                            val targetUri = classRecordUri
+                                            if (targetUri == null) {
+                                                classRecordPickerLauncher.launch(
+                                                    arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                                                )
+                                            } else {
+                                                runCatching {
+                                                    withContext(Dispatchers.IO) {
+                                                        ClassRecordExcelWriter.appendResult(context, targetUri, evaluation)
+                                                    }
+                                                }.onSuccess {
+                                                    snackbarHostState.showSnackbar(
+                                                        "Auto-saved: ${evaluation.studentId} - ${evaluation.correctCount}/${evaluation.totalItems} (${String.format(Locale.US, "%.2f", evaluation.scorePercent)}%)"
+                                                    )
+                                                    pendingEvaluation = null
+                                                }.onFailure { error ->
+                                                    snackbarHostState.showSnackbar("Save failed: ${error.message ?: "Unknown error"}")
+                                                }
+                                            }
+                                        } else {
+                                            snackbarHostState.showSnackbar("Capture failed. Please try again.")
+                                        }
+                                    } finally {
+                                        bitmap.recycle()
+                                    }
+                                }
+                            }
+                        },
                         enabled = allFourCornersDetected,
                         colors = ButtonDefaults.buttonColors(containerColor = if (allFourCornersDetected) MaterialTheme.colorScheme.primary else Color.Gray),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f).height(48.dp).padding(horizontal = 8.dp)
+                        modifier = Modifier.weight(1f).height(48.dp).padding(horizontal = 6.dp)
                     ) {
                         Text(if (allFourCornersDetected) "Capture" else "Scan", fontSize = 12.sp)
                     }
@@ -424,9 +564,11 @@ fun CaptureMode(
                     PreviewView(ctx).apply {
                         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                         scaleType = PreviewView.ScaleType.FILL_CENTER
+                        previewViewRef = this
                     }
                 },
                 update = { previewView ->
+                    previewViewRef = previewView
                     val cameraExecutor = Executors.newSingleThreadExecutor()
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
@@ -482,4 +624,22 @@ fun CaptureMode(
             }
         }
     }
+
 }
+
+private fun saveCapturedBitmap(context: Context, bitmap: Bitmap): String? {
+    return try {
+        val capturesDir = File(context.getExternalFilesDir(null), "captures").apply { mkdirs() }
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val file = File(capturesDir, "capture_$timestamp.png")
+        FileOutputStream(file).use { output ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+        }
+        file.absolutePath
+    } catch (e: Exception) {
+        Log.e("ScanScreen", "Failed to save captured bitmap", e)
+        null
+    }
+}
+
+private const val CLASS_RECORD_URI_KEY = "class_record_uri"

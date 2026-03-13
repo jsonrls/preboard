@@ -110,6 +110,7 @@ dependencies {
     implementation(libs.poi)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.coroutines.play.services)
 
     // Add Kotlinx Serialization JSON library
     implementation(libs.kotlinx.serialization.json)

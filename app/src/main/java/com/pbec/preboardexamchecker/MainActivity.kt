@@ -218,8 +218,8 @@ fun App(context: Context, examRepository: ExamRepository) {
             }
             composable(Screen.ImportSessionDetails.route) { backStackEntry ->
                 val subject = backStackEntry.arguments?.getString("subject") ?: "Unknown"
-                val importSessionId = backStackEntry.arguments?.getString("importSessionId")?.toLongOrNull() ?: 0L
-                ImportSessionDetailsScreen(navController, subject, importSessionId)
+                val questionBankId = backStackEntry.arguments?.getString("questionBankId") ?: "manual"
+                ImportSessionDetailsScreen(navController, subject, questionBankId)
             }
         }
     }
