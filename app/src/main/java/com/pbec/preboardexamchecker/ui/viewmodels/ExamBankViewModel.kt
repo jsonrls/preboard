@@ -1,0 +1,386 @@
+package com.pbec.preboardexamchecker.ui.viewmodels
+
+import android.content.Context
+import android.net.Uri
+import android.util.Log
+import com.google.firebase.auth.FirebaseAuth
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.google.firebase.firestore.FirebaseFirestore
+import com.pbec.preboardexamchecker.data.models.Question
+import com.pbec.preboardexamchecker.data.repository.ExamRepository
+import com.pbec.preboardexamchecker.data.repository.QuestionRepository
+import com.pbec.preboardexamchecker.data.repository.TransactionLogRepository
+import com.pbec.preboardexamchecker.utils.ExcelParser
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import java.io.OutputStream
+import javax.inject.Inject
+import kotlinx.coroutines.flow.stateIn
+import com.pbec.preboardexamchecker.data.models.ValidationResult
+import java.util.Locale
+
+@HiltViewModel
+class ExamBankViewModel @Inject constructor(
+    private val questionRepository: QuestionRepository,
+    private val examRepository: ExamRepository,
+    private val transactionLogRepository: TransactionLogRepository,
+    private val firestore: FirebaseFirestore,
+    private val excelParser: ExcelParser,
+    @ApplicationContext private val context: Context,
+    savedStateHandle: SavedStateHandle
+) : ViewModel() {
+    private val firebaseAuth: FirebaseAuth = FirebaseAuth.getInstance()
+    private val logTag = "ExamBankViewModel"
+
+    val subject: String = savedStateHandle.get<String>("subject") ?: "Unknown"
+
+    private val _totalQuestionCount = MutableStateFlow(0)
+    val totalQuestionCount: StateFlow<Int> = _totalQuestionCount.asStateFlow()
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    private val _pendingSaveQuestion = MutableStateFlow<Question?>(null)
+    val pendingSaveQuestion: StateFlow<Question?> = _pendingSaveQuestion.asStateFlow()
+
+    private val _nextQuestionToEdit = MutableStateFlow<Long?>(null)
+    val nextQuestionToEdit: StateFlow<Long?> = _nextQuestionToEdit.asStateFlow()
+
+    private val _manualQuestionCount = MutableStateFlow(0)
+    val manualQuestionCount: StateFlow<Int> = _manualQuestionCount.asStateFlow()
+
+    val questionsByImportSession: StateFlow<Map<Long, List<Question>>> =
+        questionRepository.getQuestionsBySubject(subject)
+            .map { questions ->
+                _manualQuestionCount.value = questions.count { it.importSessionId == 0L }
+                questions.groupBy { it.importSessionId }
+            }
+            .stateIn(viewModelScope, SharingStarted.Lazily, emptyMap())
+
+    val generatedExamCountsByImportSession: StateFlow<Map<Long, Int>> =
+        combine(
+            questionRepository.getQuestionsBySubject(subject),
+            examRepository.getExamsBySubject(subject)
+        ) { questions, exams ->
+            val questionIdsBySession = questions
+                .groupBy { it.importSessionId }
+                .mapValues { (_, groupedQuestions) -> groupedQuestions.map { it.id }.toSet() }
+
+            questionIdsBySession.mapValues { (_, sessionQuestionIds) ->
+                exams.count { exam ->
+                    val examQuestionIds = exam.questionIds.toSet()
+                    examQuestionIds.any(sessionQuestionIds::contains)
+                }
+            }
+        }.stateIn(viewModelScope, SharingStarted.Lazily, emptyMap())
+
+    init {
+        viewModelScope.launch {
+            questionRepository.getQuestionsBySubject(subject).collect { questions ->
+                _totalQuestionCount.value = questions.size
+            }
+        }
+    }
+
+    fun importQuestionsFromFile(uri: Uri, subject: String, fileName: String) {
+        viewModelScope.launch {
+            try {
+                val importSessionId = System.currentTimeMillis()
+                val extension = fileName.substringAfterLast(".").lowercase(Locale.ROOT)
+                
+                val parsedQuestions = if (extension == "csv") {
+                    excelParser.readQuestionsFromCsv(context, uri, subject, fileName)
+                } else {
+                    excelParser.readQuestionsFromExcel(context, uri, subject, fileName)
+                }
+
+                if (parsedQuestions.isNotEmpty()) {
+                    val questionsToInsert = parsedQuestions.map { question ->
+                        question.copy(importSessionId = importSessionId)
+                    }
+                    questionRepository.insertQuestions(questionsToInsert)
+                    syncImportedQuestionsToFirestore(
+                        questions = questionsToInsert,
+                        selectedSubject = subject,
+                        sourceFileName = fileName,
+                        importSessionId = importSessionId
+                    )
+                    logTransaction(
+                        action = "IMPORT_QUESTION_BANK",
+                        details = "Imported ${questionsToInsert.size} questions from '$fileName' (sessionId=$importSessionId)."
+                    )
+                    _message.value = "Successfully imported ${questionsToInsert.size} questions from $fileName."
+                } else {
+                    logTransaction(
+                        action = "IMPORT_QUESTION_BANK_EMPTY",
+                        details = "Import file '$fileName' had no valid questions."
+                    )
+                    _message.value = "No valid questions found in $fileName."
+                }
+            } catch (e: Exception) {
+                logTransaction(
+                    action = "IMPORT_QUESTION_BANK_FAILED",
+                    details = "Failed to import '$fileName': ${e.message}"
+                )
+                _message.value = "Error importing file: ${e.message}"
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun exportExamTemplate(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                    excelParser.writeExcelTemplate(outputStream)
+                    _message.value = "Exam template exported successfully!"
+                } ?: run {
+                    _message.value = "Failed to open output stream for template."
+                }
+            } catch (e: Exception) {
+                _message.value = "Error exporting template: ${e.message}"
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun setPendingSaveQuestion(question: Question?) {
+        _pendingSaveQuestion.value = question
+    }
+
+    fun saveQuestion(question: Question) {
+        viewModelScope.launch {
+            val validationResult = validateQuestion(question)
+            if (!validationResult.isValid) {
+                _message.value = validationResult.errorMessage
+                return@launch
+            }
+            try {
+                val isNewQuestion = question.id == 0L
+                questionRepository.insertQuestions(listOf(question))
+                logTransaction(
+                    action = if (isNewQuestion) "ADD_QUESTION" else "UPDATE_QUESTION",
+                    details = if (isNewQuestion) {
+                        "Added question #${question.questionNumber} (${question.fileName})."
+                    } else {
+                        "Updated question #${question.questionNumber} (${question.fileName})."
+                    }
+                )
+                _message.value = if (isNewQuestion) "Question added successfully." else "Changes saved for question ${question.questionNumber}."
+                _pendingSaveQuestion.value = null
+            } catch (e: Exception) {
+                _message.value = "Error saving changes: ${e.message}"
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun discardPendingQuestionChanges() {
+        _pendingSaveQuestion.value = null
+        _message.value = "Changes discarded."
+    }
+
+    fun deleteQuestion(question: Question, minQuestions: Int = 100) {
+        viewModelScope.launch {
+            try {
+                if (totalQuestionCount.value <= minQuestions && question.importSessionId != 0L) {
+                    _message.value = "Cannot delete question. Minimum $minQuestions questions required in the bank."
+                    return@launch
+                }
+                val deletedRows = questionRepository.deleteQuestion(question)
+                if (deletedRows > 0) {
+                    logTransaction(
+                        action = "DELETE_QUESTION",
+                        details = "Deleted question #${question.questionNumber} from '${question.fileName}'."
+                    )
+                    _message.value = "Question ${question.questionNumber} deleted."
+                } else {
+                    _message.value = "Failed to delete question ${question.questionNumber}."
+                }
+            } catch (e: Exception) {
+                _message.value = "Error deleting question: ${e.message}"
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun deleteQuestionsForImportSession(importSessionId: Long) {
+        viewModelScope.launch {
+            try {
+                val questionsInSession = questionRepository.getQuestionsByImportSessionIds(subject, listOf(importSessionId))
+                val questionIdsInSession = questionsInSession.map { it.id }.toSet()
+
+                val examsToDelete = if (questionIdsInSession.isNotEmpty()) {
+                    examRepository.getExamsBySubjectOnce(subject).filter { exam ->
+                        val examQuestionIds = exam.questionIds.toSet()
+                        examQuestionIds.any(questionIdsInSession::contains)
+                    }
+                } else {
+                    emptyList()
+                }
+
+                val deletedExamCount = examRepository.deleteExams(examsToDelete)
+                val deletedRows = questionRepository.deleteQuestionsByImportSessionId(importSessionId)
+
+                if (deletedRows > 0 && deletedExamCount > 0) {
+                    logTransaction(
+                        action = "DELETE_QUESTION_BANK",
+                        details = "Deleted $deletedRows questions for sessionId=$importSessionId and deleted $deletedExamCount generated exam(s)."
+                    )
+                    _message.value = "Successfully deleted $deletedRows questions and $deletedExamCount generated exam(s)."
+                } else if (deletedRows > 0) {
+                    logTransaction(
+                        action = "DELETE_QUESTION_BANK",
+                        details = "Deleted $deletedRows questions for sessionId=$importSessionId."
+                    )
+                    _message.value = "Successfully deleted $deletedRows questions."
+                } else if (deletedExamCount > 0) {
+                    logTransaction(
+                        action = "DELETE_QUESTION_BANK",
+                        details = "No questions deleted for sessionId=$importSessionId, but deleted $deletedExamCount generated exam(s)."
+                    )
+                    _message.value = "No questions found for this session, but removed $deletedExamCount generated exam(s) that referenced it."
+                } else {
+                    _message.value = "No questions found for this session."
+                }
+            } catch (e: Exception) {
+                _message.value = "Error deleting session: ${e.message}"
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun renameImportSession(importSessionId: Long, newName: String) {
+        viewModelScope.launch {
+            try {
+                val updatedRows = questionRepository.updateCustomSessionName(importSessionId, newName)
+                if (updatedRows > 0) {
+                    logTransaction(
+                        action = "RENAME_QUESTION_BANK",
+                        details = "Renamed import session $importSessionId to '$newName'."
+                    )
+                    _message.value = "Session renamed successfully."
+                } else {
+                    _message.value = "Failed to rename session."
+                }
+            } catch (e: Exception) {
+                _message.value = "Error renaming session: ${e.message}"
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun setNextQuestionToEdit(id: Long?) {
+        _nextQuestionToEdit.value = id
+    }
+
+    fun clearNextQuestionToEdit() {
+        _nextQuestionToEdit.value = null
+    }
+
+    fun clearMessage() {
+        _message.value = null
+    }
+
+    fun setMessage(message: String?) {
+        _message.value = message
+    }
+
+    fun validateQuestion(question: Question): ValidationResult {
+        if (question.questionText.isBlank()) return ValidationResult(false, "Question text cannot be blank.")
+        if (question.optionA.isBlank()) return ValidationResult(false, "Option A cannot be blank.")
+        if (question.optionB.isBlank()) return ValidationResult(false, "Option B cannot be blank.")
+        if (question.optionC.isBlank()) return ValidationResult(false, "Option C cannot be blank.")
+        if (question.optionD.isBlank()) return ValidationResult(false, "Option D cannot be blank.")
+        if (question.correctAnswer.isNullOrBlank()) return ValidationResult(false, "Correct answer cannot be blank.")
+        if (question.correctAnswer !in listOf("A", "B", "C", "D", "E")) return ValidationResult(false, "Correct answer must be A, B, C, D, or E.")
+        return ValidationResult(true, null)
+    }
+
+    private suspend fun logTransaction(action: String, details: String) {
+        runCatching {
+            transactionLogRepository.insertTransaction(
+                action = action,
+                subject = subject,
+                details = details
+            )
+        }
+    }
+
+    private fun syncImportedQuestionsToFirestore(
+        questions: List<Question>,
+        selectedSubject: String,
+        sourceFileName: String,
+        importSessionId: Long
+    ) {
+        if (questions.isEmpty()) return
+        ensureFirebaseUser { uid ->
+            questions.chunked(450).forEach { chunk ->
+                val batch = firestore.batch()
+                chunk.forEach { question ->
+                    val questionRef = firestore.collection("questions").document()
+                    batch.set(
+                        questionRef,
+                        mapOf(
+                            "subject" to selectedSubject,
+                            "fileName" to question.fileName,
+                            "category" to question.category,
+                            "topic" to question.topic,
+                            "questionNumber" to question.questionNumber,
+                            "questionText" to question.questionText,
+                            "optionA" to question.optionA,
+                            "optionB" to question.optionB,
+                            "optionC" to question.optionC,
+                            "optionD" to question.optionD,
+                            "correctAnswer" to question.correctAnswer,
+                            "importSessionId" to importSessionId,
+                            "sourceFileName" to sourceFileName,
+                            "uploadedByUid" to uid,
+                            "syncedAt" to com.google.firebase.Timestamp.now()
+                        )
+                    )
+                }
+
+                batch.commit()
+                    .addOnSuccessListener {
+                        Log.d(logTag, "Synced ${chunk.size} imported question(s) to Firestore.")
+                    }
+                    .addOnFailureListener { error ->
+                        Log.e(logTag, "Firestore question sync failed", error)
+                        _message.value = "Imported locally, but Firebase question sync failed: ${error.message}"
+                    }
+            }
+        }
+    }
+
+    private fun ensureFirebaseUser(onReady: (String) -> Unit) {
+        val existingUser = firebaseAuth.currentUser
+        if (existingUser != null) {
+            onReady(existingUser.uid)
+            return
+        }
+
+        firebaseAuth.signInAnonymously()
+            .addOnSuccessListener { result ->
+                val uid = result.user?.uid
+                if (uid != null) {
+                    onReady(uid)
+                } else {
+                    _message.value = "Firebase sign-in failed: missing user."
+                }
+            }
+            .addOnFailureListener { error ->
+                Log.e(logTag, "Anonymous Firebase sign-in failed", error)
+                _message.value = "Firebase sign-in failed: ${error.message}"
+            }
+    }
+}
