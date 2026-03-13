@@ -61,7 +61,7 @@ private val pages = listOf(
     OnboardingPage(
         imageVector = Icons.Outlined.CameraAlt,
         title = "Scan Answer Sheets",
-        description = "Use your camera to scan answer sheets. Our smart detection system automatically recognizes corner marks and processes student responses."
+        description = "Tap Scan at the bottom, then select a cluster and exam so the correct key is used. After capture, the app auto-detects Student ID and answers, computes the score, and stores it in your Excel class record."
     )
 )
 

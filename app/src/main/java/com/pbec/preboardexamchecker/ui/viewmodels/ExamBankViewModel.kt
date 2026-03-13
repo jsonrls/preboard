@@ -2,12 +2,9 @@ package com.pbec.preboardexamchecker.ui.viewmodels
 
 import android.content.Context
 import android.net.Uri
-import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.firebase.firestore.FirebaseFirestore
 import com.pbec.preboardexamchecker.data.models.Question
 import com.pbec.preboardexamchecker.data.repository.ExamRepository
 import com.pbec.preboardexamchecker.data.repository.QuestionRepository
@@ -27,19 +24,20 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.stateIn
 import com.pbec.preboardexamchecker.data.models.ValidationResult
 import java.util.Locale
+import java.util.UUID
 
 @HiltViewModel
 class ExamBankViewModel @Inject constructor(
     private val questionRepository: QuestionRepository,
     private val examRepository: ExamRepository,
     private val transactionLogRepository: TransactionLogRepository,
-    private val firestore: FirebaseFirestore,
     private val excelParser: ExcelParser,
     @ApplicationContext private val context: Context,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
-    private val firebaseAuth: FirebaseAuth = FirebaseAuth.getInstance()
-    private val logTag = "ExamBankViewModel"
+    private fun isManualBankId(bankId: String): Boolean {
+        return bankId == "manual" || bankId.startsWith("manual_")
+    }
 
     val subject: String = savedStateHandle.get<String>("subject") ?: "Unknown"
 
@@ -48,6 +46,12 @@ class ExamBankViewModel @Inject constructor(
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
+
+    private val _isDeleting = MutableStateFlow(false)
+    val isDeleting: StateFlow<Boolean> = _isDeleting.asStateFlow()
+
+    private val _isImporting = MutableStateFlow(false)
+    val isImporting: StateFlow<Boolean> = _isImporting.asStateFlow()
 
     private val _pendingSaveQuestion = MutableStateFlow<Question?>(null)
     val pendingSaveQuestion: StateFlow<Question?> = _pendingSaveQuestion.asStateFlow()
@@ -58,21 +62,21 @@ class ExamBankViewModel @Inject constructor(
     private val _manualQuestionCount = MutableStateFlow(0)
     val manualQuestionCount: StateFlow<Int> = _manualQuestionCount.asStateFlow()
 
-    val questionsByImportSession: StateFlow<Map<Long, List<Question>>> =
+    val questionsByImportSession: StateFlow<Map<String, List<Question>>> =
         questionRepository.getQuestionsBySubject(subject)
             .map { questions ->
-                _manualQuestionCount.value = questions.count { it.importSessionId == 0L }
-                questions.groupBy { it.importSessionId }
+                _manualQuestionCount.value = questions.count { isManualBankId(it.questionBankId) }
+                questions.groupBy { it.questionBankId }
             }
             .stateIn(viewModelScope, SharingStarted.Lazily, emptyMap())
 
-    val generatedExamCountsByImportSession: StateFlow<Map<Long, Int>> =
+    val generatedExamCountsByImportSession: StateFlow<Map<String, Int>> =
         combine(
             questionRepository.getQuestionsBySubject(subject),
             examRepository.getExamsBySubject(subject)
         ) { questions, exams ->
             val questionIdsBySession = questions
-                .groupBy { it.importSessionId }
+                .groupBy { it.questionBankId }
                 .mapValues { (_, groupedQuestions) -> groupedQuestions.map { it.id }.toSet() }
 
             questionIdsBySession.mapValues { (_, sessionQuestionIds) ->
@@ -93,8 +97,10 @@ class ExamBankViewModel @Inject constructor(
 
     fun importQuestionsFromFile(uri: Uri, subject: String, fileName: String) {
         viewModelScope.launch {
+            _isImporting.value = true
             try {
                 val importSessionId = System.currentTimeMillis()
+                val questionBankId = "bank_${UUID.randomUUID()}"
                 val extension = fileName.substringAfterLast(".").lowercase(Locale.ROOT)
                 
                 val parsedQuestions = if (extension == "csv") {
@@ -105,15 +111,13 @@ class ExamBankViewModel @Inject constructor(
 
                 if (parsedQuestions.isNotEmpty()) {
                     val questionsToInsert = parsedQuestions.map { question ->
-                        question.copy(importSessionId = importSessionId)
+                        question.copy(
+                            id = System.currentTimeMillis() + (0..9999).random(),
+                            questionBankId = questionBankId,
+                            importSessionId = importSessionId
+                        )
                     }
                     questionRepository.insertQuestions(questionsToInsert)
-                    syncImportedQuestionsToFirestore(
-                        questions = questionsToInsert,
-                        selectedSubject = subject,
-                        sourceFileName = fileName,
-                        importSessionId = importSessionId
-                    )
                     logTransaction(
                         action = "IMPORT_QUESTION_BANK",
                         details = "Imported ${questionsToInsert.size} questions from '$fileName' (sessionId=$importSessionId)."
@@ -133,6 +137,8 @@ class ExamBankViewModel @Inject constructor(
                 )
                 _message.value = "Error importing file: ${e.message}"
                 e.printStackTrace()
+            } finally {
+                _isImporting.value = false
             }
         }
     }
@@ -189,13 +195,14 @@ class ExamBankViewModel @Inject constructor(
         _message.value = "Changes discarded."
     }
 
-    fun deleteQuestion(question: Question, minQuestions: Int = 100) {
+    fun deleteQuestion(question: Question) {
+        if (!isManualBankId(question.questionBankId)) {
+            deleteQuestionsForImportSession(question.questionBankId)
+            return
+        }
         viewModelScope.launch {
+            _isDeleting.value = true
             try {
-                if (totalQuestionCount.value <= minQuestions && question.importSessionId != 0L) {
-                    _message.value = "Cannot delete question. Minimum $minQuestions questions required in the bank."
-                    return@launch
-                }
                 val deletedRows = questionRepository.deleteQuestion(question)
                 if (deletedRows > 0) {
                     logTransaction(
@@ -209,44 +216,41 @@ class ExamBankViewModel @Inject constructor(
             } catch (e: Exception) {
                 _message.value = "Error deleting question: ${e.message}"
                 e.printStackTrace()
+            } finally {
+                _isDeleting.value = false
             }
         }
     }
 
-    fun deleteQuestionsForImportSession(importSessionId: Long) {
+    fun deleteQuestionsForImportSession(questionBankId: String) {
         viewModelScope.launch {
+            _isDeleting.value = true
             try {
-                val questionsInSession = questionRepository.getQuestionsByImportSessionIds(subject, listOf(importSessionId))
+                val questionsInSession = questionsByImportSession.value[questionBankId].orEmpty()
                 val questionIdsInSession = questionsInSession.map { it.id }.toSet()
-
-                val examsToDelete = if (questionIdsInSession.isNotEmpty()) {
-                    examRepository.getExamsBySubjectOnce(subject).filter { exam ->
-                        val examQuestionIds = exam.questionIds.toSet()
-                        examQuestionIds.any(questionIdsInSession::contains)
-                    }
-                } else {
-                    emptyList()
-                }
-
-                val deletedExamCount = examRepository.deleteExams(examsToDelete)
-                val deletedRows = questionRepository.deleteQuestionsByImportSessionId(importSessionId)
+                val deletedExamCount = examRepository.deleteExamsLinkedToQuestionBank(
+                    subject = subject,
+                    questionBankId = questionBankId,
+                    questionIdsInBank = questionIdsInSession
+                )
+                val deletedRows = questionRepository.deleteQuestionsByQuestionBankId(questionBankId)
 
                 if (deletedRows > 0 && deletedExamCount > 0) {
                     logTransaction(
                         action = "DELETE_QUESTION_BANK",
-                        details = "Deleted $deletedRows questions for sessionId=$importSessionId and deleted $deletedExamCount generated exam(s)."
+                        details = "Deleted $deletedRows questions for bankId=$questionBankId and deleted $deletedExamCount generated exam(s)."
                     )
                     _message.value = "Successfully deleted $deletedRows questions and $deletedExamCount generated exam(s)."
                 } else if (deletedRows > 0) {
                     logTransaction(
                         action = "DELETE_QUESTION_BANK",
-                        details = "Deleted $deletedRows questions for sessionId=$importSessionId."
+                        details = "Deleted $deletedRows questions for bankId=$questionBankId."
                     )
                     _message.value = "Successfully deleted $deletedRows questions."
                 } else if (deletedExamCount > 0) {
                     logTransaction(
                         action = "DELETE_QUESTION_BANK",
-                        details = "No questions deleted for sessionId=$importSessionId, but deleted $deletedExamCount generated exam(s)."
+                        details = "No questions deleted for bankId=$questionBankId, but deleted $deletedExamCount generated exam(s)."
                     )
                     _message.value = "No questions found for this session, but removed $deletedExamCount generated exam(s) that referenced it."
                 } else {
@@ -255,18 +259,20 @@ class ExamBankViewModel @Inject constructor(
             } catch (e: Exception) {
                 _message.value = "Error deleting session: ${e.message}"
                 e.printStackTrace()
+            } finally {
+                _isDeleting.value = false
             }
         }
     }
 
-    fun renameImportSession(importSessionId: Long, newName: String) {
+    fun renameImportSession(questionBankId: String, newName: String) {
         viewModelScope.launch {
             try {
-                val updatedRows = questionRepository.updateCustomSessionName(importSessionId, newName)
+                val updatedRows = questionRepository.updateCustomSessionNameByQuestionBankId(questionBankId, newName)
                 if (updatedRows > 0) {
                     logTransaction(
                         action = "RENAME_QUESTION_BANK",
-                        details = "Renamed import session $importSessionId to '$newName'."
+                        details = "Renamed question bank $questionBankId to '$newName'."
                     )
                     _message.value = "Session renamed successfully."
                 } else {
@@ -314,73 +320,5 @@ class ExamBankViewModel @Inject constructor(
                 details = details
             )
         }
-    }
-
-    private fun syncImportedQuestionsToFirestore(
-        questions: List<Question>,
-        selectedSubject: String,
-        sourceFileName: String,
-        importSessionId: Long
-    ) {
-        if (questions.isEmpty()) return
-        ensureFirebaseUser { uid ->
-            questions.chunked(450).forEach { chunk ->
-                val batch = firestore.batch()
-                chunk.forEach { question ->
-                    val questionRef = firestore.collection("questions").document()
-                    batch.set(
-                        questionRef,
-                        mapOf(
-                            "subject" to selectedSubject,
-                            "fileName" to question.fileName,
-                            "category" to question.category,
-                            "topic" to question.topic,
-                            "questionNumber" to question.questionNumber,
-                            "questionText" to question.questionText,
-                            "optionA" to question.optionA,
-                            "optionB" to question.optionB,
-                            "optionC" to question.optionC,
-                            "optionD" to question.optionD,
-                            "correctAnswer" to question.correctAnswer,
-                            "importSessionId" to importSessionId,
-                            "sourceFileName" to sourceFileName,
-                            "uploadedByUid" to uid,
-                            "syncedAt" to com.google.firebase.Timestamp.now()
-                        )
-                    )
-                }
-
-                batch.commit()
-                    .addOnSuccessListener {
-                        Log.d(logTag, "Synced ${chunk.size} imported question(s) to Firestore.")
-                    }
-                    .addOnFailureListener { error ->
-                        Log.e(logTag, "Firestore question sync failed", error)
-                        _message.value = "Imported locally, but Firebase question sync failed: ${error.message}"
-                    }
-            }
-        }
-    }
-
-    private fun ensureFirebaseUser(onReady: (String) -> Unit) {
-        val existingUser = firebaseAuth.currentUser
-        if (existingUser != null) {
-            onReady(existingUser.uid)
-            return
-        }
-
-        firebaseAuth.signInAnonymously()
-            .addOnSuccessListener { result ->
-                val uid = result.user?.uid
-                if (uid != null) {
-                    onReady(uid)
-                } else {
-                    _message.value = "Firebase sign-in failed: missing user."
-                }
-            }
-            .addOnFailureListener { error ->
-                Log.e(logTag, "Anonymous Firebase sign-in failed", error)
-                _message.value = "Firebase sign-in failed: ${error.message}"
-            }
     }
 }

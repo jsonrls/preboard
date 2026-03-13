@@ -81,12 +81,12 @@ sealed interface Screen {
     }
 
     data object ImportSessionDetails : Screen {
-        override val route = "importSessionDetails/{subject}/{importSessionId}"
+        override val route = "importSessionDetails/{subject}/{questionBankId}"
         override val title = "Import Session"
         override val icon: @Composable () -> Unit = {
             Icon(Icons.Filled.UploadFile, contentDescription = "Import Session", modifier = Modifier.size(24.dp))
         }
-        fun createRoute(subject: String, importSessionId: Long) = "importSessionDetails/$subject/$importSessionId"
+        fun createRoute(subject: String, questionBankId: String) = "importSessionDetails/$subject/$questionBankId"
     }
 
     data object Students : Screen {

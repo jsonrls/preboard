@@ -18,6 +18,7 @@ import android.webkit.WebViewClient
 import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
 import com.itextpdf.io.font.constants.StandardFonts
+import com.itextpdf.io.font.PdfEncodings
 import com.itextpdf.io.image.ImageData
 import com.itextpdf.io.image.ImageDataFactory
 import com.itextpdf.kernel.font.PdfFont
@@ -44,7 +45,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.IOException
+import java.text.Normalizer
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.min
@@ -248,6 +251,18 @@ class PdfExportUtil(private val context: Context) {
                                         val bitmapWidthPx = (width * scaleFactor).toInt().coerceAtLeast(10)
                                         val bitmapHeightPx = (height * scaleFactor).toInt().coerceAtLeast(10)
 
+                                        // Extremely small rendered equations often appear as black blobs in PDF.
+                                        if (bitmapWidthPx < 18 || bitmapHeightPx < 12) {
+                                            Log.w(
+                                                "PdfExportUtil",
+                                                "Rendered equation too small (W=$bitmapWidthPx, H=$bitmapHeightPx), using text fallback for '$originalText'"
+                                            )
+                                            if (continuation.isActive) {
+                                                continuation.resume(createFallbackBitmap(originalText, targetEquationHeight))
+                                            }
+                                            return true
+                                        }
+
                                         if (!displayMode && finalWidth > availableWidth * 0.8f) {
                                             Log.w("PdfExportUtil", "Width $finalWidth exceeds available $availableWidth, retrying as display mode")
                                             continuation.cancel()
@@ -323,17 +338,18 @@ class PdfExportUtil(private val context: Context) {
     }
 
     private fun createFallbackBitmap(text: String, targetHeight: Float): Bitmap {
+        val safeText = sanitizePdfText(text)
         val paint = Paint().apply {
             color = Color.BLACK
             textSize = defaultFontSize * 0.8f
             isAntiAlias = true
         }
-        val textWidth = paint.measureText(text.take(20))
+        val textWidth = paint.measureText(safeText.take(20))
         val bitmap = createBitmap(textWidth.toInt() + 10, targetHeight.toInt(), Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         canvas.drawColor(Color.WHITE)
-        canvas.drawText(text.take(20), 5f, targetHeight * 0.8f, paint)
-        Log.d("PdfExportUtil", "Created fallback bitmap for text: $text")
+        canvas.drawText(safeText.take(20), 5f, targetHeight * 0.8f, paint)
+        Log.d("PdfExportUtil", "Created fallback bitmap for text: $safeText")
         return bitmap
     }
 
@@ -372,8 +388,22 @@ class PdfExportUtil(private val context: Context) {
                 pdfDocument = PdfDocument(pdfWriter)
                 document = Document(pdfDocument, longBondPageSize)
 
-                boldDocumentFont = PdfFontFactory.createFont(StandardFonts.HELVETICA_BOLD)
-                normalDocumentFont = PdfFontFactory.createFont(StandardFonts.HELVETICA)
+                boldDocumentFont = createPreferredPdfFont(
+                    candidates = listOf(
+                        "/system/fonts/NotoSans-Bold.ttf",
+                        "/system/fonts/Roboto-Bold.ttf",
+                        "/system/fonts/DroidSans-Bold.ttf"
+                    ),
+                    fallback = StandardFonts.HELVETICA_BOLD
+                )
+                normalDocumentFont = createPreferredPdfFont(
+                    candidates = listOf(
+                        "/system/fonts/NotoSans-Regular.ttf",
+                        "/system/fonts/Roboto-Regular.ttf",
+                        "/system/fonts/DroidSans.ttf"
+                    ),
+                    fallback = StandardFonts.HELVETICA
+                )
 
                 document.add(
                     Paragraph(resolveClusterHeader(subjectCluster))
@@ -435,7 +465,7 @@ class PdfExportUtil(private val context: Context) {
                     questionLayoutTable.addCell(questionNumberCell)
 
                     val questionContentCell = Cell().setBorder(null)
-                    val originalQuestionText = question.questionText
+                    val originalQuestionText = sanitizePdfText(question.questionText)
                     val questionIsCurrency = MathEquationConverter.isCurrencyValue(originalQuestionText)
                     val questionHasMath = MathEquationConverter.containsMathSyntax(originalQuestionText) || MathEquationConverter.isChemicalFormula(originalQuestionText)
 
@@ -454,6 +484,11 @@ class PdfExportUtil(private val context: Context) {
                                 if (part.isNotEmpty()) questionTextParagraph.add(Text(part).setFont(normalDocumentFont))
                             } else {
                                 try {
+                                    val simpleMathText = convertSimpleMathToText(part)
+                                    if (simpleMathText != null) {
+                                        questionTextParagraph.add(Text(simpleMathText).setFont(normalDocumentFont))
+                                        continue
+                                    }
                                     val convertedPart = MathEquationConverter.convertEquationTextToLaTeX(part)
                                     if (MathEquationConverter.containsMathSyntax(part) || MathEquationConverter.isChemicalFormula(part)) {
                                         val bitmap = renderLaTeXToBitmap(convertedPart, part, displayMode = false, availableWidth = pageEffectiveWidth * 0.95f)
@@ -478,7 +513,9 @@ class PdfExportUtil(private val context: Context) {
                     }
                     questionContentCell.add(questionTextParagraph)
 
-                    val options = listOf(question.optionA, question.optionB, question.optionC, question.optionD).filter { it.isNotBlank() }
+                    val options = listOf(question.optionA, question.optionB, question.optionC, question.optionD)
+                        .map { sanitizePdfText(it) }
+                        .filter { it.isNotBlank() }
                     val prefixes = listOf("A. ", "B. ", "C. ", "D. ").take(options.size)
                     val renderedOptionParts = mutableListOf<Pair<MutableList<OptionPart>, String>>()
                     val optionPrefixWidth = estimateTextWidth(prefixes[0], normalDocumentFont, defaultFontSize)
@@ -508,22 +545,15 @@ class PdfExportUtil(private val context: Context) {
                                     estimatedOptionWidth += estimateTextWidth(part, normalDocumentFont, defaultFontSize)
                                 }
                             } else {
-                                try {
-                                    val convertedPart = MathEquationConverter.convertEquationTextToLaTeX(part)
-                                    if (MathEquationConverter.containsMathSyntax(part) || MathEquationConverter.isChemicalFormula(part)) {
-                                        val bitmap = renderLaTeXToBitmap(convertedPart, part, displayMode = false, availableWidth = pageEffectiveWidth * 0.95f)
-                                        val imageData = ImageDataFactory.create(bitmap.toByteArray())
-                                        currentOptionParts.add(OptionPart(bitmap = bitmap, imageData = imageData, estimatedWidth = bitmap.width.toFloat()))
-                                        estimatedOptionWidth += bitmap.width.toFloat()
-                                    } else {
-                                        currentOptionParts.add(OptionPart(text = part, estimatedWidth = estimateTextWidth(part, normalDocumentFont, defaultFontSize)))
-                                        estimatedOptionWidth += estimateTextWidth(part, normalDocumentFont, defaultFontSize)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("PdfExportUtil", "Error rendering option LaTeX '$part': ${e.message}")
-                                    currentOptionParts.add(OptionPart(text = part, estimatedWidth = estimateTextWidth(part, normalDocumentFont, defaultFontSize)))
-                                    estimatedOptionWidth += estimateTextWidth(part, normalDocumentFont, defaultFontSize)
-                                }
+                                // Do not render option math as bitmaps. Tiny raster outputs become black artifacts.
+                                val textFallback = convertSimpleMathToText(part) ?: sanitizePdfText(part)
+                                currentOptionParts.add(
+                                    OptionPart(
+                                        text = textFallback,
+                                        estimatedWidth = estimateTextWidth(textFallback, normalDocumentFont, defaultFontSize)
+                                    )
+                                )
+                                estimatedOptionWidth += estimateTextWidth(textFallback, normalDocumentFont, defaultFontSize)
                             }
                         }
                         renderedOptionParts.add(Pair(currentOptionParts, convertedOptionText))
@@ -705,5 +735,75 @@ class PdfExportUtil(private val context: Context) {
                 "PROFESSIONAL ELECTRICAL ENGINEERING SUBJECTS"
             else -> subjectCluster.uppercase()
         }
+    }
+
+    private fun createPreferredPdfFont(candidates: List<String>, fallback: String): PdfFont {
+        for (path in candidates) {
+            try {
+                if (File(path).exists()) {
+                    return PdfFontFactory.createFont(path, PdfEncodings.IDENTITY_H)
+                }
+            } catch (_: Exception) {
+                // Try next candidate font.
+            }
+        }
+        return PdfFontFactory.createFont(fallback)
+    }
+
+    private fun sanitizePdfText(raw: String): String {
+        if (raw.isBlank()) return raw
+
+        val normalized = Normalizer.normalize(raw, Normalizer.Form.NFKC)
+        return normalized
+            .replace("\u00A0", " ")
+            .replace("\u200B", "")
+            .replace("\u200C", "")
+            .replace("\u200D", "")
+            .replace("\uFEFF", "")
+            .replace("“", "\"")
+            .replace("”", "\"")
+            .replace("‘", "'")
+            .replace("’", "'")
+            .replace("–", "-")
+            .replace("—", "-")
+            .replace("−", "-")
+            .replace("•", "*")
+            .replace("…", "...")
+            .replace(Regex("[\\p{Cntrl}&&[^\n\t]]"), "")
+    }
+
+    private fun convertSimpleMathToText(part: String): String? {
+        val cleaned = sanitizePdfText(part.trim())
+
+        // Keep simple ratio/fraction tokens as plain text to avoid raster artifacts (e.g., 1/L, V/I, kg/m).
+        if (cleaned.matches(Regex("^[A-Za-z0-9().+\\-]+\\s*/\\s*[A-Za-z0-9().+\\-]+$"))) {
+            return cleaned.replace(Regex("\\s*/\\s*"), "/")
+        }
+
+        val match = Regex("^([A-Za-z0-9()+\\-*/.]+)\\^([0-9+\\-]+)$").find(cleaned) ?: return null
+        val base = match.groupValues[1]
+        val exp = match.groupValues[2]
+        val superscript = buildString {
+            exp.forEach { ch ->
+                append(
+                    when (ch) {
+                        '0' -> '⁰'
+                        '1' -> '¹'
+                        '2' -> '²'
+                        '3' -> '³'
+                        '4' -> '⁴'
+                        '5' -> '⁵'
+                        '6' -> '⁶'
+                        '7' -> '⁷'
+                        '8' -> '⁸'
+                        '9' -> '⁹'
+                        '+' -> '⁺'
+                        '-' -> '⁻'
+                        else -> return null
+                    }
+                )
+            }
+        }
+        return base + superscript
     }
 }

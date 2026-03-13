@@ -172,10 +172,8 @@ fun LoginScreen(
                     }
                 } else {
                     viewModel.login(instructorId.value, password.value) {
+                        // Let App-level navigation decide whether to show onboarding or programs.
                         onLogin()
-                        navController.navigate(Screen.Programs.route) {
-                            popUpTo(Screen.Login.route) { inclusive = true }
-                        }
                     }
                 }
             },

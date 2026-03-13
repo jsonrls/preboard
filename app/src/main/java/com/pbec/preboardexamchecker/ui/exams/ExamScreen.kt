@@ -78,7 +78,7 @@ fun ExamScreen(
     var showGenerateExamDialog by remember { mutableStateOf(false) }
     var numberOfQuestionsInput by remember { mutableStateOf("100") }
     var numberOfQuestionsInputError by remember { mutableStateOf(false) }
-    var selectedImportSessionIds by remember { mutableStateOf(setOf<Long>()) }
+    var selectedImportSessionIds by remember { mutableStateOf(setOf<String>()) }
     var importSessionSelectionError by remember { mutableStateOf(false) }
 
     var showDeleteConfirmationDialog by remember { mutableStateOf(false) }
@@ -90,8 +90,8 @@ fun ExamScreen(
 
     val sortedImportSessionIds = remember(questionsByImportSession.keys) {
         val sessionKeys = questionsByImportSession.keys
-        val manualSession = sessionKeys.filter { it == 0L }
-        val importedSessions = sessionKeys.filter { it != 0L }.sortedDescending()
+        val manualSession = sessionKeys.filter { it == "manual" || it.startsWith("manual_") }
+        val importedSessions = sessionKeys.filter { it != "manual" && !it.startsWith("manual_") }.sortedDescending()
         importedSessions + manualSession
     }
 
@@ -320,7 +320,7 @@ fun ExamScreen(
                             ) {
                                 itemsIndexed(sortedImportSessionIds, key = { _, id -> id }) { index, importSessionId ->
                                     val questionsInSession = questionsByImportSession[importSessionId] ?: emptyList()
-                                    val headerText = if (importSessionId == 0L) {
+                                    val headerText = if (importSessionId == "manual" || importSessionId.startsWith("manual_")) {
                                         "Manually Added"
                                     } else {
                                         questionsInSession.firstOrNull()?.fileName ?: "Imported File"
@@ -343,7 +343,7 @@ fun ExamScreen(
                                             }
                                         )
                                         Text(
-                                            text = if (importSessionId == 0L) {
+                                            text = if (importSessionId == "manual" || importSessionId.startsWith("manual_")) {
                                                 "$headerText (${questionsInSession.size} questions)"
                                             } else {
                                                 "$headerText #${String.format(Locale.getDefault(), "%03d", index + 1)} (${questionsInSession.size} questions)"

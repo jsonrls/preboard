@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -40,6 +42,8 @@ fun ExamBankScreen(navController: NavController, subject: String, viewModel: Exa
     val generatedExamCountsByImportSession by viewModel.generatedExamCountsByImportSession.collectAsState()
     val nextQuestionToEditId by viewModel.nextQuestionToEdit.collectAsState()
     val manualQuestionCount by viewModel.manualQuestionCount.collectAsState()
+    val isDeleting by viewModel.isDeleting.collectAsState()
+    val isImporting by viewModel.isImporting.collectAsState()
 
     var showConfirmationDialog by remember { mutableStateOf(false) }
     var confirmedImportUri by remember { mutableStateOf<Uri?>(null) }
@@ -50,13 +54,13 @@ fun ExamBankScreen(navController: NavController, subject: String, viewModel: Exa
     var questionToDelete by remember { mutableStateOf<Question?>(null) }
 
     var showImportSessionDeleteConfirmationDialog by remember { mutableStateOf(false) }
-    var importSessionToDeleteId by remember { mutableStateOf<Long?>(null) }
+    var importSessionToDeleteId by remember { mutableStateOf<String?>(null) }
     var importSessionToDeleteName by remember { mutableStateOf<String?>(null) }
     var willBankBeEmptyAfterSessionDeletion by remember { mutableStateOf(false) }
     var generatedExamCountToDelete by remember { mutableStateOf(0) }
 
     var showRenameDialog by remember { mutableStateOf(false) }
-    var importSessionToRenameId by remember { mutableStateOf<Long?>(null) }
+    var importSessionToRenameId by remember { mutableStateOf<String?>(null) }
     var currentSessionName by remember { mutableStateOf("") }
     var newSessionName by remember { mutableStateOf("") }
 
@@ -73,8 +77,8 @@ fun ExamBankScreen(navController: NavController, subject: String, viewModel: Exa
 
     val sortedImportSessionIds = remember(questionsByImportSession.keys) {
         val sessionKeys = questionsByImportSession.keys
-        val manualSession = sessionKeys.filter { it == 0L }
-        val importedSessions = sessionKeys.filter { it != 0L }.sortedDescending()
+        val manualSession = sessionKeys.filter { it == "manual" || it.startsWith("manual_") }
+        val importedSessions = sessionKeys.filter { it != "manual" && !it.startsWith("manual_") }.sortedDescending()
         importedSessions + manualSession
     }
 
@@ -194,7 +198,7 @@ fun ExamBankScreen(navController: NavController, subject: String, viewModel: Exa
                 ) {
                     items(sortedImportSessionIds, key = { it }) { importSessionId ->
                         val questionsInSession = questionsByImportSession[importSessionId] ?: emptyList()
-                        val isManualSession = importSessionId == 0L
+                        val isManualSession = importSessionId == "manual" || importSessionId.startsWith("manual_")
 
                         if (!(isManualSession && questionsInSession.isEmpty())) {
                             val firstQuestion = questionsInSession.firstOrNull()
@@ -235,7 +239,10 @@ fun ExamBankScreen(navController: NavController, subject: String, viewModel: Exa
                                                 modifier = if (isManualSession) Modifier else Modifier.weight(1f, fill = false)
                                             )
                                             if (!isManualSession) {
-                                                val sessionIndex = sortedImportSessionIds.filter { it != 0L }.reversed().indexOf(importSessionId)
+                                                val sessionIndex = sortedImportSessionIds
+                                                    .filter { it != "manual" && !it.startsWith("manual_") }
+                                                    .reversed()
+                                                    .indexOf(importSessionId)
                                                 val formattedImportNumber = String.format(Locale.getDefault(), "%03d", sessionIndex + 1)
                                                 Spacer(modifier = Modifier.padding(horizontal = 4.dp))
                                                 Text(
@@ -318,6 +325,7 @@ fun ExamBankScreen(navController: NavController, subject: String, viewModel: Exa
                                         optionC = "",
                                         optionD = "",
                                         correctAnswer = null,
+                                        questionBankId = "manual_${subject.lowercase(Locale.ROOT).replace(" ", "_")}",
                                         importSessionId = 0L
                                     )
                                 },
@@ -580,6 +588,32 @@ fun ExamBankScreen(navController: NavController, subject: String, viewModel: Exa
                     }) { Text("Discard") }
                 }
             )
+        }
+
+        if (isDeleting || isImporting) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.35f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.5.dp)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            if (isDeleting) "Deleting..." else "Importing question bank...",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+            }
         }
     }
 }

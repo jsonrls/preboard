@@ -21,6 +21,18 @@ import kotlin.random.Random
 
 enum class Corner { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 
+data class ScanEvaluationResult(
+    val studentId: String,
+    val examName: String,
+    val subject: String,
+    val scannedAnswers: String,
+    val correctCount: Int,
+    val totalItems: Int
+) {
+    val scorePercent: Double
+        get() = if (totalItems == 0) 0.0 else (correctCount.toDouble() / totalItems.toDouble()) * 100.0
+}
+
 @HiltViewModel
 class ScanViewModel @Inject constructor(
     private val examRepository: ExamRepository,
@@ -126,4 +138,54 @@ class ScanViewModel @Inject constructor(
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = false
     )
+
+    suspend fun evaluateCapturedAnswers(
+        exam: Exam,
+        studentId: String,
+        rawAnswers: String
+    ): ScanEvaluationResult {
+        val normalizedAnswers = normalizeAnswers(rawAnswers)
+        return evaluateCapturedAnswers(exam, studentId, normalizedAnswers)
+    }
+
+    suspend fun evaluateCapturedAnswers(
+        exam: Exam,
+        studentId: String,
+        normalizedAnswers: List<Char?>
+    ): ScanEvaluationResult {
+        val questionIds = exam.questionIds
+        val allQuestions = questionRepository.getAllQuestionsForSubjectOnce(exam.subject)
+        val questionById = allQuestions.associateBy { it.id }
+
+        var correct = 0
+        questionIds.forEachIndexed { index, questionId ->
+            val expected = questionById[questionId]?.correctAnswer?.trim()?.uppercase()?.firstOrNull()
+            val actual = normalizedAnswers.getOrNull(index)
+            if (expected != null && actual != null && expected == actual) {
+                correct++
+            }
+        }
+
+        return ScanEvaluationResult(
+            studentId = studentId.trim(),
+            examName = exam.examName,
+            subject = exam.subject,
+            scannedAnswers = normalizedAnswers.joinToString(separator = "") { it?.toString() ?: "-" },
+            correctCount = correct,
+            totalItems = questionIds.size
+        )
+    }
+
+    private fun normalizeAnswers(rawAnswers: String): List<Char?> {
+        return rawAnswers
+            .uppercase()
+            .   mapNotNull { ch ->
+                when {
+                    ch == 'A' || ch == 'B' || ch == 'C' || ch == 'D' -> ch
+                    ch == '-' || ch == 'X' || ch == '_' || ch == '*' -> null
+                    ch.isWhitespace() || ch == ',' || ch == ';' || ch == '|' -> null
+                    else -> null
+                }
+            }
+    }
 }
