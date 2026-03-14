@@ -1,62 +1,82 @@
-# PreBoard Exam Checker
+# PBEC — PreBoard Exam Checker Portal
 
-PreBoard Exam Checker is an Android application designed to automate and streamline the process of checking and managing preboard examination results. It leverages mobile camera technology, image processing, and cloud services to provide a fast and efficient experience for educators.
+A powerful, web-based management system for the PreBoard Exam Checker (PBEC) platform. This portal allows administrators and teachers to manage student records, maintain a comprehensive question bank, generate exams, and analyze results.
 
-## Features
+## 🚀 Getting Started
 
-- **Automated Exam Scanning:** Uses the device camera and OpenCV to scan and grade shaded answer sheets.
-- **Student & Exam Management:** Organize student records and exam sessions within the app.
-- **Firebase Integration:** Secure authentication and real-time data storage using Firebase Auth and Firestore.
-- **Detailed Analytics:** (Coming soon/Available) Get insights into student performance.
-- **Export Options:** Export results to Excel (XLSX) or PDF formats for official record-keeping.
+Since this project uses **ES Modules** for its logic, it must be served via a local web server to function correctly in modern browsers (due to security restrictions on the `file://` protocol).
 
-## Tech Stack
+### 1. Using VS Code (Highly Recommended)
+1. Install the **Live Server** extension.
+2. Open this folder in VS Code.
+3. Click **"Go Live"** in the bottom-right corner of the status bar.
 
-- **Language:** Kotlin
-- **UI Framework:** Jetpack Compose
-- **Architecture:** MVVM (Model-View-ViewModel)
-- **Dependency Injection:** Hilt
-- **Database:** Room (Local) & Firebase Firestore (Cloud)
-- **Image Processing:** OpenCV
-- **Authentication:** Firebase Authentication
-- **External Libraries:** Apache POI (Excel), iText7 (PDF), CameraX
-
-## Prerequisites
-
-- Android Studio Iguana (2023.2.1) or newer
-- JDK 17
-- Android Device or Emulator running API 26 (Android 8.0) or higher
-- Firebase Project (configured with `google-services.json`)
-
-## Getting Started
-
-### 1. Clone the Repository
+### 2. Using Python
+If you have Python installed, run this command in your terminal:
 ```bash
-git clone https://github.com/jsonrls/preboard.git
-cd preboard
+# Python 3.x
+python3 -m http.server 8000
+```
+Then visit `http://localhost:8000` in your browser.
+
+### 3. Using Node.js (npm)
+If you have Node.js installed, you can use the built-in scripts:
+```bash
+npm install
+npm run dev
+```
+This will start a local server at `http://localhost:3000`.
+
+---
+
+## 🛠 Tech Stack
+
+- **Frontend**: Vanilla HTML5, CSS3 (Custom Design System), and JavaScript (ES6+).
+- **Backend**: [Firebase](https://firebase.google.com/) (Authentication & Firestore).
+- **Icons**: Emoji-based iconography for a lightweight, modern feel.
+- **Components**: Custom-built shell, sidebar, and data tables.
+
+---
+
+## 📂 Project Structure
+
+```text
+web/
+├── admin/            # Admin-only pages (Students, Question Bank, etc.)
+├── teacher/          # Teacher-specific pages and dashboards
+├── css/              # Global styles and design system tokens
+├── js/               # Core logic (Auth, Firebase config, UI utilities)
+├── index.html        # Main login portal
+└── README.md         # You are here!
 ```
 
-### 2. Firebase Setup
-1. Create a new project in the [Firebase Console](https://console.firebase.google.com/).
-2. Add an Android App to your Firebase project using the package name `com.pbec.preboardexamchecker`.
-3. Download the `google-services.json` file and place it in the `app/` directory of the project.
-4. Enable **Anonymous Authentication** and **Firestore** in the Firebase console.
+## 🗄️ Database Initialization
 
-### 3. Open and Build
-1. Open Android Studio and select **Open**.
-2. Navigate to the project folder and click **OK**.
-3. Let Gradle sync and download all necessary dependencies.
+If your Firestore database is empty, you can automatically create the necessary collections and add sample data:
+1. Start your local server (`npm run dev`).
+2. Visit `http://localhost:3000/setup.html` in your browser.
+3. Click **"Initialize Collections"**.
 
-### 4. Run the App
-1. Connect an Android device via USB or start an emulator.
-2. Click the **Run** button (green play icon) in Android Studio.
+---
 
-## Project Structure
+## 🔑 Authentication
 
-- `app/src/main/java/com/pbec/preboardexamchecker/ui`: Contains all Compose screens and ViewModels.
-- `app/src/main/java/com/pbec/preboardexamchecker/data`: Contains Room database entities, DAOs, and repository classes.
-- `app/src/main/java/com/pbec/preboardexamchecker/util`: Utility classes for image processing, file handling, and formatting.
+Access is restricted based on user roles defined in Firestore:
+- **Admin**: Full access to all management tools.
+- **Teacher**: Access to exam tools and student summaries.
 
-## License
+Authentication is handled via **Firebase Auth**. Configuration is set to the `preboardexam-checker` project and can be found in `js/firebase-config.js`.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+---
+
+## 🌟 Key Features
+
+- **Dashboard**: High-level overview of system stats.
+- **Student Management**: Full CRUD operations for student records.
+- **Question Bank**: Centralized repository for exam questions.
+- **Exam Generator**: Automated tool to create pre-board exams.
+- **Analytics**: Performance tracking and summary reports.
+
+---
+
+© 2026 PBEC — CATCI (Legazpi • Ligao • Polangui)
